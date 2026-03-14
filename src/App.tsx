@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { 
   Search, 
   User, 
@@ -16,8 +16,6 @@ import {
   ThumbsUp,
   ThumbsDown,
   Lightbulb,
-  X,
-  Check,
   TrendingUp,
   TrendingDown,
   Calendar,
@@ -31,22 +29,190 @@ import {
   History,
   Pin,
   Bookmark,
-  Zap
+  Zap,
+  LogIn,
+  LogOut,
+  AlertCircle
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import { 
+  collection, 
+  query, 
+  where, 
+  onSnapshot, 
+  addDoc, 
+  updateDoc, 
+  deleteDoc, 
+  doc, 
+  serverTimestamp,
+  orderBy
+} from 'firebase/firestore';
+import { onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
+import { db, auth, signIn, logout } from './firebase';
 import { cn } from './lib/utils';
 import { Note, ViewState } from './types';
-import { INITIAL_NOTES } from './constants';
+
+// Error Handling Spec
+enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write',
+}
+
+interface FirestoreErrorInfo {
+  error: string;
+  operationType: OperationType;
+  path: string | null;
+  authInfo: {
+    userId: string | undefined;
+    email: string | null | undefined;
+    emailVerified: boolean | undefined;
+    isAnonymous: boolean | undefined;
+    tenantId: string | null | undefined;
+    providerInfo: {
+      providerId: string;
+      displayName: string | null;
+      email: string | null;
+      photoUrl: string | null;
+    }[];
+  }
+}
+
+function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
+  const errInfo: FirestoreErrorInfo = {
+    error: error instanceof Error ? error.message : String(error),
+    authInfo: {
+      userId: auth.currentUser?.uid,
+      email: auth.currentUser?.email,
+      emailVerified: auth.currentUser?.emailVerified,
+      isAnonymous: auth.currentUser?.isAnonymous,
+      tenantId: auth.currentUser?.tenantId,
+      providerInfo: auth.currentUser?.providerData.map(provider => ({
+        providerId: provider.providerId,
+        displayName: provider.displayName,
+        email: provider.email,
+        photoUrl: provider.photoURL
+      })) || []
+    },
+    operationType,
+    path
+  }
+  console.error('Firestore Error: ', JSON.stringify(errInfo));
+  // We'll show a toast or alert instead of throwing to keep the app running
+  alert(`Firestore Error: ${errInfo.error}`);
+}
 
 export default function App() {
   const [view, setView] = useState<ViewState>('list');
-  const [notes, setNotes] = useState<Note[]>(INITIAL_NOTES);
+  const [notes, setNotes] = useState<Note[]>([]);
   const [selectedNote, setSelectedNote] = useState<Note | null>(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  const [user, setUser] = useState<FirebaseUser | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [filter, setFilter] = useState<'all' | 'favorites' | 'pinned'>('all');
 
-  const handleCreateNote = () => {
-    setView('create');
-    setSelectedNote(null);
+  // Auth Listener
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+      setLoading(false);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // Real-time Notes Listener
+  useEffect(() => {
+    if (!user) {
+      setNotes([]);
+      return;
+    }
+
+    const q = query(
+      collection(db, 'notes'), 
+      where('uid', '==', user.uid),
+      orderBy('date', 'desc')
+    );
+
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const fetchedNotes = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      })) as Note[];
+      setNotes(fetchedNotes);
+    }, (error) => {
+      handleFirestoreError(error, OperationType.LIST, 'notes');
+    });
+
+    return () => unsubscribe();
+  }, [user]);
+
+  const handleCreateNote = async (noteData: Partial<Note>) => {
+    if (!user) return;
+    try {
+      const now = new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+      await addDoc(collection(db, 'notes'), {
+        ...noteData,
+        uid: user.uid,
+        date: now,
+        modifiedDate: now,
+        authorName: user.displayName,
+        authorAvatar: user.photoURL,
+        createdAt: serverTimestamp(),
+      });
+      setView('list');
+    } catch (error) {
+      handleFirestoreError(error, OperationType.CREATE, 'notes');
+    }
+  };
+
+  const handleUpdateNote = async (noteId: string, noteData: Partial<Note>) => {
+    if (!user) return;
+    try {
+      const now = new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+      await updateDoc(doc(db, 'notes', noteId), {
+        ...noteData,
+        modifiedDate: now,
+      });
+      setView('list');
+      setSelectedNote(null);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `notes/${noteId}`);
+    }
+  };
+
+  const handleDeleteNote = async (noteId: string) => {
+    if (!window.confirm('Are you sure you want to delete this note?')) return;
+    try {
+      await deleteDoc(doc(db, 'notes', noteId));
+      setView('list');
+      setSelectedNote(null);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.DELETE, `notes/${noteId}`);
+    }
+  };
+
+  const toggleFavorite = async (note: Note) => {
+    try {
+      await updateDoc(doc(db, 'notes', note.id), {
+        isFavorite: !note.isFavorite
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `notes/${note.id}`);
+    }
+  };
+
+  const togglePin = async (note: Note) => {
+    try {
+      await updateDoc(doc(db, 'notes', note.id), {
+        isPinned: !note.isPinned
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `notes/${note.id}`);
+    }
   };
 
   const handleViewNote = (note: Note) => {
@@ -54,10 +220,56 @@ export default function App() {
     setView('view');
   };
 
+  const handleEditNote = (note: Note) => {
+    setSelectedNote(note);
+    setView('create');
+  };
+
   const handleBack = () => {
     setView('list');
     setSelectedNote(null);
   };
+
+  const filteredNotes = notes.filter(note => {
+    const matchesSearch = note.title.toLowerCase().includes(searchQuery.toLowerCase()) || 
+                         note.category.toLowerCase().includes(searchQuery.toLowerCase());
+    const matchesFilter = filter === 'all' || 
+                         (filter === 'favorites' && note.isFavorite) || 
+                         (filter === 'pinned' && note.isPinned);
+    return matchesSearch && matchesFilter;
+  });
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary"></div>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return (
+      <div className="min-h-screen bg-background flex flex-col items-center justify-center p-8 text-center">
+        <motion.div 
+          initial={{ opacity: 0, scale: 0.9 }}
+          animate={{ opacity: 1, scale: 1 }}
+          className="max-w-md"
+        >
+          <h1 className="font-headline text-5xl font-extrabold mb-6">Notebook</h1>
+          <p className="text-on-surface-variant mb-8 text-lg">
+            A refined space for your thoughts and explorations. Sign in to start syncing your notes across all devices.
+          </p>
+          <button 
+            onClick={signIn}
+            className="flex items-center gap-3 px-8 py-4 bg-primary text-white rounded-2xl font-bold text-lg shadow-xl hover:scale-105 transition-transform mx-auto"
+          >
+            <LogIn size={24} />
+            Sign in with Google
+          </button>
+        </motion.div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex min-h-screen bg-background text-on-surface font-body">
@@ -71,10 +283,35 @@ export default function App() {
           <p className="text-sm text-on-surface-variant">Personal Workspace</p>
         </div>
         <nav className="mt-8 px-4 space-y-2">
-          <SidebarLink icon={<FileText size={20} />} label="All Notes" active />
-          <SidebarLink icon={<Star size={20} />} label="Favorites" />
+          <SidebarLink 
+            icon={<FileText size={20} />} 
+            label="All Notes" 
+            active={filter === 'all'} 
+            onClick={() => { setFilter('all'); setView('list'); }}
+          />
+          <SidebarLink 
+            icon={<Star size={20} />} 
+            label="Favorites" 
+            active={filter === 'favorites'} 
+            onClick={() => { setFilter('favorites'); setView('list'); }}
+          />
+          <SidebarLink 
+            icon={<Pin size={20} />} 
+            label="Pinned" 
+            active={filter === 'pinned'} 
+            onClick={() => { setFilter('pinned'); setView('list'); }}
+          />
           <SidebarLink icon={<Folder size={20} />} label="Notebooks" />
           <SidebarLink icon={<Archive size={20} />} label="Archive" />
+          <div className="pt-8">
+            <button 
+              onClick={logout}
+              className="flex items-center gap-4 px-6 py-4 rounded-full w-full hover:bg-error-container text-error font-medium transition-colors"
+            >
+              <LogOut size={20} />
+              <span>Sign Out</span>
+            </button>
+          </div>
         </nav>
       </aside>
 
@@ -82,14 +319,14 @@ export default function App() {
       <main className="flex-1 flex flex-col min-h-screen relative overflow-hidden">
         {/* Top Bar */}
         <header className="h-20 flex items-center justify-between px-8 bg-surface/50 sticky top-0 z-10 backdrop-blur-md">
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-4 flex-1">
             <button 
               onClick={() => setIsSidebarOpen(!isSidebarOpen)}
               className="lg:hidden p-2 hover:bg-surface-container-high rounded-full transition-colors"
             >
               <Menu size={24} />
             </button>
-            {view === 'view' && (
+            {view !== 'list' && (
               <button 
                 onClick={handleBack}
                 className="p-2 hover:bg-surface-container-high rounded-full transition-colors"
@@ -97,17 +334,24 @@ export default function App() {
                 <ArrowLeft size={24} />
               </button>
             )}
-            <h2 className="font-headline text-xl font-bold tracking-tight">
-              {view === 'create' ? 'New Note' : 'Notebook'}
-            </h2>
+            <div className="relative flex-1 max-w-md hidden md:block">
+              <Search size={18} className="absolute left-4 top-1/2 -translate-y-1/2 text-on-surface-variant" />
+              <input 
+                type="text"
+                placeholder="Search notes..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="w-full bg-surface-container-high border-none rounded-full py-2 pl-12 pr-4 text-sm focus:ring-2 focus:ring-primary/40 transition-all outline-none"
+              />
+            </div>
           </div>
           <div className="flex items-center gap-2">
-            <button className="p-3 hover:bg-surface-container-high rounded-full transition-colors">
+            <button className="md:hidden p-3 hover:bg-surface-container-high rounded-full transition-colors">
               <Search size={20} />
             </button>
-            <button className="p-3 hover:bg-surface-container-high rounded-full transition-colors">
-              <User size={20} />
-            </button>
+            <div className="p-1">
+              <img src={user.photoURL || ''} alt="User" className="w-10 h-10 rounded-full border-2 border-primary/20" referrerPolicy="no-referrer" />
+            </div>
           </div>
         </header>
 
@@ -124,28 +368,40 @@ export default function App() {
               >
                 <div className="mb-12">
                   <h3 className="font-headline text-4xl lg:text-5xl font-extrabold leading-tight mb-2">
-                    Thoughts & <br />
-                    <span className="text-primary">Explorations</span>
+                    {filter === 'all' ? 'Thoughts &' : filter === 'favorites' ? 'Favorite' : 'Pinned'} <br />
+                    <span className="text-primary">{filter === 'all' ? 'Explorations' : 'Notes'}</span>
                   </h3>
                   <div className="flex gap-3 mt-4">
                     <span className="bg-surface-container-high px-4 py-1.5 rounded-full text-xs font-semibold text-on-surface-variant tracking-wide">
-                      LATEST: AUG 24
+                      LATEST: {filteredNotes[0]?.date || 'N/A'}
                     </span>
                     <span className="bg-tertiary-fixed text-on-tertiary-fixed-variant px-4 py-1.5 rounded-full text-xs font-semibold tracking-wide">
-                      {notes.length} NOTES
+                      {filteredNotes.length} NOTES
                     </span>
                   </div>
                 </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                  {notes.filter(n => n.id !== '5').map((note) => (
-                    <NoteCard 
-                      key={note.id} 
-                      note={note} 
-                      onClick={() => handleViewNote(note)}
-                    />
-                  ))}
-                </div>
+                {filteredNotes.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center py-20 text-center text-on-surface-variant">
+                    <div className="bg-surface-container p-6 rounded-full mb-4">
+                      <FileText size={48} className="opacity-20" />
+                    </div>
+                    <p className="text-lg font-medium">No notes found</p>
+                    <p className="text-sm">Try a different search or filter.</p>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    {filteredNotes.map((note) => (
+                      <NoteCard 
+                        key={note.id} 
+                        note={note} 
+                        onClick={() => handleViewNote(note)}
+                        onFavorite={() => toggleFavorite(note)}
+                        onPin={() => togglePin(note)}
+                      />
+                    ))}
+                  </div>
+                )}
               </motion.div>
             )}
 
@@ -157,7 +413,11 @@ export default function App() {
                 exit={{ opacity: 0, scale: 1.05 }}
                 className="p-8 lg:p-12 max-w-4xl mx-auto"
               >
-                <NoteEditor onCancel={handleBack} onSave={handleBack} />
+                <NoteEditor 
+                  initialNote={selectedNote}
+                  onCancel={handleBack} 
+                  onSave={(data) => selectedNote ? handleUpdateNote(selectedNote.id, data) : handleCreateNote(data)} 
+                />
               </motion.div>
             )}
 
@@ -169,7 +429,13 @@ export default function App() {
                 exit={{ opacity: 0, x: -20 }}
                 className="p-8 lg:p-12 max-w-4xl mx-auto"
               >
-                <NoteViewer note={selectedNote} />
+                <NoteViewer 
+                  note={selectedNote} 
+                  onDelete={() => handleDeleteNote(selectedNote.id)} 
+                  onEdit={() => handleEditNote(selectedNote)}
+                  onFavorite={() => toggleFavorite(selectedNote)}
+                  onPin={() => togglePin(selectedNote)}
+                />
               </motion.div>
             )}
           </AnimatePresence>
@@ -178,7 +444,7 @@ export default function App() {
         {/* FAB */}
         {view === 'list' && (
           <button 
-            onClick={handleCreateNote}
+            onClick={() => setView('create')}
             className="fixed bottom-12 right-12 w-14 h-14 rounded-xl bg-gradient-to-br from-primary to-primary-container text-white flex items-center justify-center shadow-xl hover:scale-105 transition-transform z-20"
           >
             <Plus size={32} />
@@ -189,29 +455,29 @@ export default function App() {
   );
 }
 
-function SidebarLink({ icon, label, active = false }: { icon: React.ReactNode, label: string, active?: boolean }) {
+function SidebarLink({ icon, label, active = false, onClick }: { icon: React.ReactNode, label: string, active?: boolean, onClick?: () => void }) {
   return (
-    <a 
-      href="#" 
+    <button 
+      onClick={onClick}
       className={cn(
-        "flex items-center gap-4 px-6 py-4 rounded-full transition-colors",
+        "flex items-center gap-4 px-6 py-4 rounded-full transition-colors w-full text-left",
         active ? "bg-primary-fixed text-primary font-semibold" : "hover:bg-surface-container-high text-on-surface-variant font-medium"
       )}
     >
       {icon}
       <span className="font-label">{label}</span>
-    </a>
+    </button>
   );
 }
 
-function NoteCard({ note, onClick }: { note: Note, onClick: () => void }) {
+function NoteCard({ note, onClick, onFavorite, onPin }: { note: Note, onClick: () => void, onFavorite: () => void | Promise<void>, onPin: () => void | Promise<void>, key?: React.Key }) {
   const isFeatured = note.category === 'Project Alpha';
   
   return (
     <article 
       onClick={onClick}
       className={cn(
-        "rounded-xl p-8 transition-all hover:-translate-y-1 cursor-pointer",
+        "rounded-xl p-8 transition-all hover:-translate-y-1 cursor-pointer group relative",
         isFeatured ? "bg-primary text-white shadow-lg" : "bg-surface-container-lowest shadow-sm border border-transparent hover:border-outline-variant/10"
       )}
     >
@@ -222,10 +488,20 @@ function NoteCard({ note, onClick }: { note: Note, onClick: () => void }) {
         )}>
           {note.category}
         </span>
-        {note.isFavorite && <Star size={18} className="fill-tertiary text-tertiary" />}
-        {note.isPinned && <Pin size={18} className="text-on-surface-variant" />}
-        {note.category === 'Bookshelf' && <Bookmark size={18} className="text-on-surface-variant" />}
-        {isFeatured && <Zap size={18} className="fill-white text-white" />}
+        <div className="flex gap-2">
+          <button 
+            onClick={(e) => { e.stopPropagation(); onFavorite(); }}
+            className={cn("p-1 rounded-full hover:bg-black/5 transition-colors", note.isFavorite ? "text-tertiary" : "text-on-surface-variant/40")}
+          >
+            <Star size={18} className={cn(note.isFavorite && "fill-tertiary")} />
+          </button>
+          <button 
+            onClick={(e) => { e.stopPropagation(); onPin(); }}
+            className={cn("p-1 rounded-full hover:bg-black/5 transition-colors", note.isPinned ? (isFeatured ? "text-white" : "text-primary") : "text-on-surface-variant/40")}
+          >
+            <Pin size={18} className={cn(note.isPinned && "fill-current")} />
+          </button>
+        </div>
       </div>
       
       <h4 className="font-headline text-2xl font-bold mb-6 leading-snug">
@@ -235,14 +511,14 @@ function NoteCard({ note, onClick }: { note: Note, onClick: () => void }) {
       <div className="space-y-4">
         <div className="flex gap-4">
           <TrendingUp size={18} className={cn("mt-1 shrink-0", isFeatured ? "text-white" : "text-primary")} />
-          <p className={cn("text-sm", isFeatured ? "text-white/90" : "text-on-surface-variant")}>
-            <strong className={isFeatured ? "text-white" : "text-on-surface"}>Pros:</strong> {note.pros[0]}...
+          <p className={cn("text-sm line-clamp-2", isFeatured ? "text-white/90" : "text-on-surface-variant")}>
+            <strong className={isFeatured ? "text-white" : "text-on-surface"}>Pros:</strong> {note.pros?.[0] || 'N/A'}
           </p>
         </div>
         <div className="flex gap-4">
           <TrendingDown size={18} className={cn("mt-1 shrink-0", isFeatured ? "text-white" : "text-error")} />
-          <p className={cn("text-sm", isFeatured ? "text-white/90" : "text-on-surface-variant")}>
-            <strong className={isFeatured ? "text-white" : "text-on-surface"}>Cons:</strong> {note.cons[0]}...
+          <p className={cn("text-sm line-clamp-2", isFeatured ? "text-white/90" : "text-on-surface-variant")}>
+            <strong className={isFeatured ? "text-white" : "text-on-surface"}>Cons:</strong> {note.cons?.[0] || 'N/A'}
           </p>
         </div>
       </div>
@@ -253,33 +529,60 @@ function NoteCard({ note, onClick }: { note: Note, onClick: () => void }) {
       )}>
         {note.authorAvatar ? (
           <img src={note.authorAvatar} alt="Avatar" className="w-6 h-6 rounded-full object-cover" referrerPolicy="no-referrer" />
-        ) : note.authorInitials ? (
+        ) : (
           <div className="w-6 h-6 rounded-full bg-secondary-fixed flex items-center justify-center text-[10px] font-bold text-on-secondary-fixed">
-            {note.authorInitials}
+            {note.authorName?.charAt(0) || 'U'}
           </div>
-        ) : null}
+        )}
         <span className={cn("text-xs font-medium", isFeatured ? "text-white/60" : "text-on-surface-variant")}>
-          {note.category === 'Project Alpha' ? 'Updated 5m ago' : note.category === 'Bookshelf' ? 'Created Aug 12' : `Edited ${note.date}`}
+          Edited {note.date}
         </span>
       </div>
     </article>
   );
 }
 
-function NoteEditor({ onCancel, onSave }: { onCancel: () => void, onSave: () => void }) {
+function NoteEditor({ initialNote, onCancel, onSave }: { initialNote?: Note | null, onCancel: () => void, onSave: (data: Partial<Note>) => void }) {
+  const [title, setTitle] = useState(initialNote?.title || '');
+  const [category, setCategory] = useState(initialNote?.category || '');
+  const [refUrl, setRefUrl] = useState(initialNote?.referenceUrl || '');
+  const [pros, setPros] = useState(initialNote?.pros?.join('\n') || '');
+  const [cons, setCons] = useState(initialNote?.cons?.join('\n') || '');
+  const [solution, setSolution] = useState(initialNote?.solution || '');
+
+  const handleSave = () => {
+    if (!title || !category) {
+      alert('Title and Category are required');
+      return;
+    }
+    onSave({
+      title,
+      category,
+      referenceUrl: refUrl,
+      pros: pros.split('\n').filter(p => p.trim()),
+      cons: cons.split('\n').filter(c => c.trim()),
+      solution,
+      tags: category.split(',').map(t => t.trim()),
+    });
+  };
+
   return (
     <div className="space-y-8">
       <div className="flex items-center justify-between mb-12">
         <div>
-          <span className="inline-block px-3 py-1 rounded-full bg-tertiary-fixed text-on-tertiary-fixed text-xs font-semibold mb-2 uppercase">DRAFT</span>
-          <h2 className="font-headline text-4xl font-bold leading-tight tracking-tight">New Synthesis</h2>
+          <span className="inline-block px-3 py-1 rounded-full bg-tertiary-fixed text-on-tertiary-fixed text-xs font-semibold mb-2 uppercase">
+            {initialNote ? 'EDITING' : 'DRAFT'}
+          </span>
+          <h2 className="font-headline text-4xl font-bold leading-tight tracking-tight">
+            {initialNote ? 'Refine Synthesis' : 'New Synthesis'}
+          </h2>
         </div>
         <div className="flex gap-3">
           <button onClick={onCancel} className="px-6 py-2.5 rounded-full font-medium text-on-surface-variant hover:bg-surface-container-high transition-all">
             Cancel
           </button>
-          <button onClick={onSave} className="px-8 py-2.5 rounded-full font-medium bg-gradient-to-r from-primary to-primary-container text-white shadow-lg hover:shadow-primary/20 transition-all">
-            Save
+          <button onClick={handleSave} className="px-8 py-2.5 rounded-full font-medium bg-gradient-to-r from-primary to-primary-container text-white shadow-lg hover:shadow-primary/20 transition-all">
+            {initialNote ? 'Update' : 'Save'}
           </button>
         </div>
       </div>
@@ -288,19 +591,33 @@ function NoteEditor({ onCancel, onSave }: { onCancel: () => void, onSave: () => 
         <div className="md:col-span-2 space-y-2">
           <label className="block text-xs font-semibold uppercase tracking-widest text-on-surface-variant px-1">Document Title</label>
           <input 
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
             className="w-full bg-surface-container-lowest border-none rounded-xl p-4 text-lg font-headline focus:ring-2 focus:ring-primary/40 placeholder:text-outline-variant transition-all outline-none" 
             placeholder="Enter note title..." 
           />
         </div>
         <div className="space-y-2">
-          <label className="block text-xs font-semibold uppercase tracking-widest text-on-surface-variant px-1">Reference Link</label>
-          <div className="relative">
-            <LinkIcon size={18} className="absolute left-4 top-1/2 -translate-y-1/2 text-on-surface-variant" />
-            <input 
-              className="w-full bg-surface-container-high border-none rounded-xl py-4 pl-12 pr-4 text-sm focus:ring-2 focus:ring-primary/40 placeholder:text-outline-variant transition-all outline-none" 
-              placeholder="https://..." 
-            />
-          </div>
+          <label className="block text-xs font-semibold uppercase tracking-widest text-on-surface-variant px-1">Category / Project</label>
+          <input 
+            value={category}
+            onChange={(e) => setCategory(e.target.value)}
+            className="w-full bg-surface-container-high border-none rounded-xl p-4 text-sm focus:ring-2 focus:ring-primary/40 placeholder:text-outline-variant transition-all outline-none" 
+            placeholder="e.g. Tech Design" 
+          />
+        </div>
+      </div>
+
+      <div className="space-y-2">
+        <label className="block text-xs font-semibold uppercase tracking-widest text-on-surface-variant px-1">Reference Link</label>
+        <div className="relative">
+          <LinkIcon size={18} className="absolute left-4 top-1/2 -translate-y-1/2 text-on-surface-variant" />
+          <input 
+            value={refUrl}
+            onChange={(e) => setRefUrl(e.target.value)}
+            className="w-full bg-surface-container-high border-none rounded-xl py-4 pl-12 pr-4 text-sm focus:ring-2 focus:ring-primary/40 placeholder:text-outline-variant transition-all outline-none" 
+            placeholder="https://..." 
+          />
         </div>
       </div>
 
@@ -310,9 +627,11 @@ function NoteEditor({ onCancel, onSave }: { onCancel: () => void, onSave: () => 
             <div className="w-8 h-8 rounded-full bg-primary-fixed flex items-center justify-center text-primary">
               <TrendingUp size={16} />
             </div>
-            <label className="text-sm font-semibold">Key Advantages</label>
+            <label className="text-sm font-semibold">Key Advantages (One per line)</label>
           </div>
           <textarea 
+            value={pros}
+            onChange={(e) => setPros(e.target.value)}
             className="w-full bg-transparent border-none resize-none p-0 focus:ring-0 placeholder:text-outline-variant leading-relaxed outline-none" 
             placeholder="What are the strong points?" 
             rows={6}
@@ -323,9 +642,11 @@ function NoteEditor({ onCancel, onSave }: { onCancel: () => void, onSave: () => 
             <div className="w-8 h-8 rounded-full bg-error-container flex items-center justify-center text-error">
               <TrendingDown size={16} />
             </div>
-            <label className="text-sm font-semibold">Identified Risks</label>
+            <label className="text-sm font-semibold">Identified Risks (One per line)</label>
           </div>
           <textarea 
+            value={cons}
+            onChange={(e) => setCons(e.target.value)}
             className="w-full bg-transparent border-none resize-none p-0 focus:ring-0 placeholder:text-outline-variant leading-relaxed outline-none" 
             placeholder="Where are the vulnerabilities?" 
             rows={6}
@@ -342,21 +663,12 @@ function NoteEditor({ onCancel, onSave }: { onCancel: () => void, onSave: () => 
           <label className="text-lg font-headline font-semibold">Strategic Solution</label>
         </div>
         <textarea 
+          value={solution}
+          onChange={(e) => setSolution(e.target.value)}
           className="w-full bg-transparent border-none resize-none p-0 focus:ring-0 text-lg placeholder:text-outline-variant leading-relaxed outline-none" 
           placeholder="Synthesize the findings into a clear path forward..." 
           rows={8}
         />
-      </div>
-
-      <div className="flex flex-wrap gap-4 pt-4">
-        <div className="flex items-center gap-2 text-on-surface-variant text-sm">
-          <Calendar size={16} />
-          <span>October 24, 2023</span>
-        </div>
-        <div className="flex items-center gap-2 text-on-surface-variant text-sm">
-          <Tag size={16} />
-          <span>Productivity, Design</span>
-        </div>
       </div>
 
       {/* Formatting Bar */}
@@ -372,7 +684,7 @@ function NoteEditor({ onCancel, onSave }: { onCancel: () => void, onSave: () => 
   );
 }
 
-function NoteViewer({ note }: { note: Note }) {
+function NoteViewer({ note, onDelete, onEdit, onFavorite, onPin }: { note: Note, onDelete: () => void | Promise<void>, onEdit: () => void, onFavorite: () => void | Promise<void>, onPin: () => void | Promise<void> }) {
   return (
     <div className="max-w-4xl mx-auto">
       <header className="mb-12">
@@ -388,7 +700,7 @@ function NoteViewer({ note }: { note: Note }) {
         {note.referenceUrl && (
           <div className="flex items-center gap-3 p-4 bg-surface-container-low rounded-xl group cursor-pointer border border-transparent hover:border-outline-variant/20 transition-all">
             <LinkIcon size={20} className="text-primary" />
-            <a className="text-primary font-medium hover:underline truncate" href={note.referenceUrl}>
+            <a className="text-primary font-medium hover:underline truncate" href={note.referenceUrl} target="_blank" rel="noreferrer">
               {note.referenceUrl}
             </a>
           </div>
@@ -404,7 +716,7 @@ function NoteViewer({ note }: { note: Note }) {
             <h3 className="font-headline text-2xl font-bold">Pros</h3>
           </div>
           <ul className="space-y-4">
-            {note.pros.map((pro, i) => (
+            {note.pros?.map((pro, i) => (
               <li key={i} className="flex gap-3 items-start">
                 <span className="text-primary mt-1">•</span>
                 <p className="text-on-surface-variant leading-relaxed">{pro}</p>
@@ -421,7 +733,7 @@ function NoteViewer({ note }: { note: Note }) {
             <h3 className="font-headline text-2xl font-bold">Cons</h3>
           </div>
           <ul className="space-y-4">
-            {note.cons.map((con, i) => (
+            {note.cons?.map((con, i) => (
               <li key={i} className="flex gap-3 items-start">
                 <span className="text-tertiary mt-1">•</span>
                 <p className="text-on-surface-variant leading-relaxed">{con}</p>
@@ -445,7 +757,7 @@ function NoteViewer({ note }: { note: Note }) {
           </p>
         </div>
         <div className="mt-8 pt-8 border-t border-outline-variant/20 flex flex-wrap gap-2">
-          {note.tags.map(tag => (
+          {note.tags?.map(tag => (
             <span key={tag} className="bg-surface-container-high px-4 py-1.5 rounded-full text-sm font-medium text-on-surface-variant">
               #{tag}
             </span>
@@ -460,23 +772,35 @@ function NoteViewer({ note }: { note: Note }) {
           <span className="text-[10px] font-bold uppercase tracking-tighter text-on-surface-variant">Share</span>
         </button>
         <div className="w-px h-8 bg-outline-variant/30"></div>
-        <button className="flex flex-col items-center gap-1 group">
-          <Star size={20} className="text-on-surface-variant group-hover:text-primary transition-colors" />
+        <button 
+          onClick={onFavorite}
+          className="flex flex-col items-center gap-1 group"
+        >
+          <Star size={20} className={cn("transition-colors", note.isFavorite ? "text-tertiary fill-tertiary" : "text-on-surface-variant group-hover:text-primary")} />
           <span className="text-[10px] font-bold uppercase tracking-tighter text-on-surface-variant">Fav</span>
         </button>
         <div className="w-px h-8 bg-outline-variant/30"></div>
-        <button className="flex flex-col items-center gap-1 group">
-          <History size={20} className="text-on-surface-variant group-hover:text-primary transition-colors" />
-          <span className="text-[10px] font-bold uppercase tracking-tighter text-on-surface-variant">History</span>
+        <button 
+          onClick={onPin}
+          className="flex flex-col items-center gap-1 group"
+        >
+          <Pin size={20} className={cn("transition-colors", note.isPinned ? "text-primary fill-primary" : "text-on-surface-variant group-hover:text-primary")} />
+          <span className="text-[10px] font-bold uppercase tracking-tighter text-on-surface-variant">Pin</span>
         </button>
       </div>
 
       {/* Actions Bar */}
       <div className="fixed top-4 right-8 flex items-center gap-2 z-50">
-        <button className="p-2 text-on-surface hover:bg-surface-container rounded-full transition-colors">
+        <button 
+          onClick={onEdit}
+          className="p-2 text-on-surface hover:bg-surface-container rounded-full transition-colors"
+        >
           <Edit2 size={20} />
         </button>
-        <button className="p-2 text-error hover:bg-error-container rounded-full transition-colors">
+        <button 
+          onClick={onDelete}
+          className="p-2 text-error hover:bg-error-container rounded-full transition-colors"
+        >
           <Trash2 size={20} />
         </button>
         <button className="p-2 text-on-surface hover:bg-surface-container rounded-full transition-colors">

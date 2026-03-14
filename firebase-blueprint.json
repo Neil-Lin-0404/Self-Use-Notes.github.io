@@ -1,0 +1,33 @@
+{
+  "entities": {
+    "Note": {
+      "title": "Note",
+      "description": "A note document containing thoughts, explorations, and analysis.",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string", "description": "The title of the note." },
+        "category": { "type": "string", "description": "The category or project name." },
+        "date": { "type": "string", "description": "The creation date string." },
+        "modifiedDate": { "type": "string", "description": "The last modified date string." },
+        "pros": { "type": "array", "items": { "type": "string" }, "description": "List of advantages." },
+        "cons": { "type": "array", "items": { "type": "string" }, "description": "List of risks/disadvantages." },
+        "solution": { "type": "string", "description": "The proposed strategic solution." },
+        "tags": { "type": "array", "items": { "type": "string" }, "description": "List of tags." },
+        "isFavorite": { "type": "boolean", "description": "Whether the note is favorited." },
+        "isPinned": { "type": "boolean", "description": "Whether the note is pinned." },
+        "isDraft": { "type": "boolean", "description": "Whether the note is a draft." },
+        "referenceUrl": { "type": "string", "description": "An optional reference link." },
+        "uid": { "type": "string", "description": "The owner's user ID." },
+        "authorName": { "type": "string", "description": "The author's display name." },
+        "authorAvatar": { "type": "string", "description": "The author's avatar URL." }
+      },
+      "required": ["title", "category", "uid"]
+    }
+  },
+  "firestore": {
+    "notes": {
+      "schema": "Note",
+      "description": "Collection of user notes."
+    }
+  }
+}

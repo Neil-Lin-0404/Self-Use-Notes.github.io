@@ -12,6 +12,7 @@ export interface Note {
   isPinned?: boolean;
   isDraft?: boolean;
   referenceUrl?: string;
+  authorName?: string;
   authorAvatar?: string;
   authorInitials?: string;
 }

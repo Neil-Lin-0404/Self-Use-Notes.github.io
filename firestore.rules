@@ -1,0 +1,84 @@
+// ===============================================================
+// Assumed Data Model
+// ===============================================================
+//
+// Collection: notes
+// Document ID: auto-generated
+// Fields:
+//   - title: string (required)
+//   - category: string (required)
+//   - date: string
+//   - modifiedDate: string
+//   - pros: list of strings
+//   - cons: list of strings
+//   - solution: string
+//   - tags: list of strings
+//   - isFavorite: bool
+//   - isPinned: bool
+//   - isDraft: bool
+//   - referenceUrl: string
+//   - uid: string (required, owner ID)
+//   - authorName: string
+//   - authorAvatar: string
+//
+// ===============================================================
+
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+    
+    function isDocOwner() {
+      return isAuthenticated() && request.auth.uid == resource.data.uid;
+    }
+    
+    function isValidNote(data) {
+      return data.keys().hasAll(['title', 'category', 'uid']) &&
+             data.title is string && data.title.size() > 0 && data.title.size() < 200 &&
+             data.category is string && data.category.size() > 0 && data.category.size() < 100 &&
+             data.uid == request.auth.uid &&
+             (!('pros' in data) || data.pros is list) &&
+             (!('cons' in data) || data.cons is list) &&
+             (!('solution' in data) || data.solution is string && data.solution.size() < 10000) &&
+             (!('tags' in data) || data.tags is list) &&
+             (!('referenceUrl' in data) || (data.referenceUrl is string && data.referenceUrl.size() < 500));
+    }
+
+    function isAdmin() {
+      return isAuthenticated() &&
+        (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
+          (request.auth.token.email == "c84327515@gmail.com" && request.auth.token.email_verified == true));
+    }
+
+    match /notes/{noteId} {
+      // Users can only read their own notes
+      allow read: if isDocOwner() || isAdmin();
+      
+      // Users can only create notes where they are the owner
+      allow create: if isAuthenticated() && isValidNote(request.resource.data);
+      
+      // Users can only update their own notes and must maintain validity
+      allow update: if isDocOwner() && isValidNote(request.resource.data) && 
+                    request.resource.data.uid == resource.data.uid;
+      
+      // Users can only delete their own notes
+      allow delete: if isDocOwner() || isAdmin();
+    }
+    
+    match /users/{userId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow write: if isOwner(userId) || isAdmin();
+    }
+  }
+}
