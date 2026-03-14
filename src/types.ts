@@ -15,6 +15,8 @@ export interface Note {
   authorName?: string;
   authorAvatar?: string;
   authorInitials?: string;
+  checklist?: { text: string; completed: boolean }[];
+  imageUrl?: string;
 }
 
-export type ViewState = 'list' | 'create' | 'view';
+export type ViewState = 'list' | 'create' | 'view' | 'recent' | 'settings';
